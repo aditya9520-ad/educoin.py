@@ -1,45 +1,37 @@
 """
-EduCoin – Classroom Cryptocurrency
------------------------------------
-A Flask web app where teachers can mint coins and students can transfer them.
-This is a self-contained example with SQLite.
+educoin_streamlit_app.py
+Streamlit Classroom Cryptocurrency (EduCoin)
 
 Run:
-    pip install flask
-    export TEACHER_PASSWORD=yourpass   # or set TEACHER_PASSWORD=yourpass on Windows
-    python educoin_flask_app.py
+    pip install streamlit
+    pip install -r requirements.txt    # or `pip install streamlit` if you don't use requirements file
+    export TEACHER_PASSWORD=yourpass   # Windows CMD: set TEACHER_PASSWORD=yourpass
+    streamlit run educoin_streamlit_app.py
 """
 
-from flask import Flask, request, jsonify, render_template_string, g
+import streamlit as st
 import sqlite3
 import os
 import uuid
 import datetime
 
-DB_PATH = os.path.join(os.path.dirname(__file__), 'educoin.db')
-TEACHER_PASSWORD = os.environ.get('TEACHER_PASSWORD', 'teacherpass')  # change for production
+# CONFIG
+DB_PATH = os.path.join(os.path.dirname(__file__), "educoin.db")
+TEACHER_PASSWORD = os.environ.get("TEACHER_PASSWORD", "teacherpass")  # override in env for production
 
-app = Flask(__name__)
-app.config['JSON_SORT_KEYS'] = False
-
-# ------------------ Database helpers ------------------
-def get_db():
-    db = getattr(g, '_database', None)
-    if db is None:
-        db = g._database = sqlite3.connect(DB_PATH)
-        db.row_factory = sqlite3.Row
-    return db
-
-@app.teardown_appcontext
-def close_connection(exception):
-    db = getattr(g, '_database', None)
-    if db is not None:
-        db.close()
+# -------------------------
+# Database helpers
+# -------------------------
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 def init_db():
-    db = sqlite3.connect(DB_PATH)
-    c = db.cursor()
-    c.execute('''
+    conn = get_db_connection()
+    c = conn.cursor()
+    c.execute(
+        """
         CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
@@ -47,9 +39,11 @@ def init_db():
             pin TEXT NOT NULL,
             balance INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL
-        )
-    ''')
-    c.execute('''
+        );
+        """
+    )
+    c.execute(
+        """
         CREATE TABLE IF NOT EXISTS transactions (
             id TEXT PRIMARY KEY,
             timestamp TEXT NOT NULL,
@@ -57,179 +51,179 @@ def init_db():
             to_addr TEXT,
             amount INTEGER NOT NULL,
             note TEXT
-        )
-    ''')
-    db.commit()
-    db.close()
+        );
+        """
+    )
+    conn.commit()
+    conn.close()
 
 def now_iso():
-    return datetime.datetime.utcnow().isoformat() + 'Z'
+    return datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
-def create_user(name):
+def create_user(name: str):
+    conn = get_db_connection()
     uid = str(uuid.uuid4())
-    addr = 'EDU-' + uid[:8]
-    pin = str(uuid.uuid4())[:4]
-    db = get_db()
-    db.execute(
-        'INSERT INTO users (id, name, public_address, pin, balance, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-        (uid, name, addr, pin, 0, now_iso())
+    addr = "EDU-" + uid[:8]
+    pin = str(uuid.uuid4())[:6]  # 6-char PIN for a bit more usability
+    created_at = now_iso()
+    conn.execute(
+        "INSERT INTO users (id, name, public_address, pin, balance, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (uid, name, addr, pin, 0, created_at),
     )
-    db.commit()
-    return {'id': uid, 'name': name, 'public_address': addr, 'pin': pin, 'balance': 0}
+    conn.commit()
+    conn.close()
+    return {"id": uid, "name": name, "public_address": addr, "pin": pin, "balance": 0, "created_at": created_at}
 
-def get_user_by_addr(addr):
-    db = get_db()
-    return db.execute('SELECT * FROM users WHERE public_address = ?', (addr,)).fetchone()
+def get_user_by_addr(addr: str):
+    conn = get_db_connection()
+    row = conn.execute("SELECT * FROM users WHERE public_address = ?", (addr,)).fetchone()
+    conn.close()
+    return row
 
-def update_balance(addr, new_balance):
-    db = get_db()
-    db.execute('UPDATE users SET balance = ? WHERE public_address = ?', (new_balance, addr))
-    db.commit()
+def update_balance(addr: str, new_balance: int):
+    conn = get_db_connection()
+    conn.execute("UPDATE users SET balance = ? WHERE public_address = ?", (new_balance, addr))
+    conn.commit()
+    conn.close()
 
-def add_transaction(from_addr, to_addr, amount, note=None):
+def add_transaction(from_addr, to_addr, amount: int, note: str = None):
     tid = str(uuid.uuid4())
-    db = get_db()
-    db.execute(
-        'INSERT INTO transactions (id, timestamp, from_addr, to_addr, amount, note) VALUES (?, ?, ?, ?, ?, ?)',
-        (tid, now_iso(), from_addr, to_addr, amount, note)
+    conn = get_db_connection()
+    conn.execute(
+        "INSERT INTO transactions (id, timestamp, from_addr, to_addr, amount, note) VALUES (?, ?, ?, ?, ?, ?)",
+        (tid, now_iso(), from_addr, to_addr, amount, note),
     )
-    db.commit()
+    conn.commit()
+    conn.close()
     return tid
 
+def get_all_users():
+    conn = get_db_connection()
+    rows = conn.execute("SELECT name, public_address, balance FROM users ORDER BY balance DESC").fetchall()
+    conn.close()
+    return rows
+
+def get_ledger(limit=200):
+    conn = get_db_connection()
+    rows = conn.execute(
+        "SELECT timestamp, from_addr, to_addr, amount, note FROM transactions ORDER BY timestamp DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    conn.close()
+    return rows
+
+# Initialize DB on import
 init_db()
 
-# ------------------ Routes ------------------
-@app.route('/')
-def index():
-    db = get_db()
-    users = db.execute('SELECT name, public_address, balance FROM users ORDER BY name').fetchall()
-    ledger = db.execute(
-        'SELECT timestamp, from_addr, to_addr, amount, note FROM transactions ORDER BY timestamp DESC LIMIT 20'
-    ).fetchall()
-    html = '''
-    <h1>EduCoin Classroom Dashboard</h1>
-    <h2>Students</h2>
-    <table border="1" cellpadding="6">
-      <tr><th>Name</th><th>Address</th><th>Balance</th></tr>
-      {% for u in users %}
-        <tr><td>{{u['name']}}</td><td>{{u['public_address']}}</td><td>{{u['balance']}}</td></tr>
-      {% endfor %}
-    </table>
-    <h2>Ledger (latest 20)</h2>
-    <table border="1" cellpadding="6">
-      <tr><th>Time</th><th>From</th><th>To</th><th>Amount</th><th>Note</th></tr>
-      {% for t in ledger %}
-        <tr><td>{{t['timestamp']}}</td><td>{{t['from_addr'] or 'MINT'}}</td>
-            <td>{{t['to_addr']}}</td><td>{{t['amount']}}</td><td>{{t['note']}}</td></tr>
-      {% endfor %}
-    </table>
-    <p>Use API endpoints to create wallets, mint coins, and transfer coins.</p>
-    '''
-    return render_template_string(html, users=users, ledger=ledger)
+# -------------------------
+# Streamlit UI
+# -------------------------
+st.set_page_config(page_title="EduCoin Classroom", layout="wide")
+st.title("🎓 EduCoin — Classroom Cryptocurrency")
+st.markdown(
+    "A simple classroom economy: teacher mints coins, students transfer them, and everyone sees balances & a leaderboard."
+)
 
-# Create wallet
-@app.route('/create_wallet', methods=['POST'])
-def route_create_wallet():
-    data = request.get_json() or {}
-    name = data.get('name')
-    if not name:
-        return jsonify({'error': 'name required'}), 400
-    user = create_user(name)
-    return jsonify({'user': user}), 201
+menu = st.sidebar.selectbox("Menu", ["Dashboard", "Create Wallet", "Mint (Teacher)", "Transfer"])
 
-# Mint coins (teacher only)
-@app.route('/mint', methods=['POST'])
-def route_mint():
-    data = request.get_json() or {}
-    pwd = data.get('teacher_password')
-    to_addr = data.get('to')
-    amount = int(data.get('amount', 1))
-    note = data.get('note', 'minted by teacher')
+# DASHBOARD
+if menu == "Dashboard":
+    st.header("Balances & Leaderboard")
+    users = get_all_users()
+    if users:
+        st.table([{"Name": u["name"], "Address": u["public_address"], "Balance": u["balance"]} for u in users])
+    else:
+        st.info("No users found. Create wallets from the 'Create Wallet' page.")
 
-    if pwd != TEACHER_PASSWORD:
-        return jsonify({'error': 'invalid teacher password'}), 403
-    if not to_addr:
-        return jsonify({'error': 'to address required'}), 400
+    st.subheader("Recent Transactions (Ledger)")
+    ledger = get_ledger(50)
+    if ledger:
+        st.table(
+            [
+                {
+                    "Time": t["timestamp"],
+                    "From": (t["from_addr"] or "MINT"),
+                    "To": t["to_addr"],
+                    "Amount": t["amount"],
+                    "Note": t["note"] or "",
+                }
+                for t in ledger
+            ]
+        )
+    else:
+        st.info("No transactions yet.")
 
-    user = get_user_by_addr(to_addr)
-    if not user:
-        return jsonify({'error': 'recipient not found'}), 404
+# CREATE WALLET
+elif menu == "Create Wallet":
+    st.header("Create a Student Wallet")
+    name = st.text_input("Student name")
+    if st.button("Create Wallet"):
+        if not name.strip():
+            st.error("Name is required.")
+        else:
+            user = create_user(name.strip())
+            st.success("Wallet created!")
+            st.code(f"Address: {user['public_address']}\nPIN: {user['pin']}", language="text")
+            st.info("Copy the address and PIN and give them to the student. Keep PIN secret for transfers.")
 
-    new_balance = user['balance'] + amount
-    update_balance(to_addr, new_balance)
-    tid = add_transaction(None, to_addr, amount, note)
-    return jsonify({
-        'tx_id': tid,
-        'to': to_addr,
-        'amount': amount,
-        'new_balance': new_balance
-    }), 200
+# MINT (teacher-only)
+elif menu == "Mint (Teacher)":
+    st.header("Teacher Minting (Create EduCoins)")
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        to_addr = st.text_input("Recipient address (e.g. EDU-xxxxxxxx)")
+        amount = st.number_input("Amount to mint", min_value=1, value=1, step=1)
+        note = st.text_input("Note", value="minted by teacher")
+    with col2:
+        password = st.text_input("Teacher password", type="password")
+        st.write("")
+        if st.button("Mint"):
+            if password != TEACHER_PASSWORD:
+                st.error("Invalid teacher password.")
+            elif not to_addr:
+                st.error("Recipient address required.")
+            else:
+                user = get_user_by_addr(to_addr)
+                if not user:
+                    st.error("Recipient not found.")
+                else:
+                    new_balance = user["balance"] + int(amount)
+                    update_balance(to_addr, new_balance)
+                    tid = add_transaction(None, to_addr, int(amount), note)
+                    st.success(f"Minted {amount} EduCoin(s) to {to_addr}.")
+                    st.write(f"Transaction id: {tid}")
+                    st.write(f"New balance: {new_balance}")
 
-# Transfer between students
-@app.route('/transfer', methods=['POST'])
-def route_transfer():
-    data = request.get_json() or {}
-    from_addr = data.get('from')
-    to_addr = data.get('to')
-    amount = int(data.get('amount', 0))
-    pin = data.get('pin')
-    note = data.get('note', '')
+# TRANSFER
+elif menu == "Transfer":
+    st.header("Transfer EduCoins (Student)")
+    from_addr = st.text_input("Sender address")
+    pin = st.text_input("Sender PIN", type="password")
+    to_addr = st.text_input("Recipient address")
+    amount = st.number_input("Amount to transfer", min_value=1, value=1, step=1)
+    note = st.text_input("Note (optional)")
+    if st.button("Transfer"):
+        if not all([from_addr, to_addr]):
+            st.error("Both sender and recipient addresses are required.")
+        else:
+            sender = get_user_by_addr(from_addr)
+            receiver = get_user_by_addr(to_addr)
+            if not sender:
+                st.error("Sender not found.")
+            elif not receiver:
+                st.error("Recipient not found.")
+            elif pin != sender["pin"]:
+                st.error("Invalid PIN.")
+            elif sender["balance"] < amount:
+                st.error("Insufficient balance.")
+            else:
+                update_balance(from_addr, sender["balance"] - int(amount))
+                update_balance(to_addr, receiver["balance"] + int(amount))
+                tid = add_transaction(from_addr, to_addr, int(amount), note)
+                st.success(f"Transferred {amount} EduCoin(s) from {from_addr} to {to_addr}.")
+                st.write(f"Transaction id: {tid}")
 
-    if not all([from_addr, to_addr]) or amount <= 0:
-        return jsonify({'error': 'from, to, and positive amount required'}), 400
-
-    sender = get_user_by_addr(from_addr)
-    receiver = get_user_by_addr(to_addr)
-    if not sender or not receiver:
-        return jsonify({'error': 'sender or receiver not found'}), 404
-
-    if pin != sender['pin']:
-        return jsonify({'error': 'invalid PIN'}), 403
-
-    if sender['balance'] < amount:
-        return jsonify({'error': 'insufficient balance'}), 400
-
-    update_balance(from_addr, sender['balance'] - amount)
-    update_balance(to_addr, receiver['balance'] + amount)
-    tid = add_transaction(from_addr, to_addr, amount, note)
-    return jsonify({
-        'tx_id': tid,
-        'from': from_addr,
-        'to': to_addr,
-        'amount': amount
-    }), 200
-
-# Balances
-@app.route('/balances', methods=['GET'])
-def route_balances():
-    db = get_db()
-    rows = db.execute(
-        'SELECT name, public_address, balance FROM users ORDER BY balance DESC'
-    ).fetchall()
-    out = [{'name': r['name'], 'address': r['public_address'], 'balance': r['balance']} for r in rows]
-    return jsonify({'balances': out})
-
-# Leaderboard
-@app.route('/leaderboard', methods=['GET'])
-def route_leaderboard():
-    db = get_db()
-    rows = db.execute(
-        'SELECT name, public_address, balance FROM users ORDER BY balance DESC LIMIT 10'
-    ).fetchall()
-    out = [{'name': r['name'], 'address': r['public_address'], 'balance': r['balance']} for r in rows]
-    return jsonify({'leaderboard': out})
-
-# Ledger
-@app.route('/ledger', methods=['GET'])
-def route_ledger():
-    db = get_db()
-    rows = db.execute(
-        'SELECT timestamp, from_addr, to_addr, amount, note FROM transactions '
-        'ORDER BY timestamp DESC LIMIT 200'
-    ).fetchall()
-    out = [dict(r) for r in rows]
-    return jsonify({'ledger': out})
-
-# ------------------ Run ------------------
-if __name__ == '__main__':
-    app.run(debug=True)
+# Footer / quick tips
+st.sidebar.markdown("---")
+st.sidebar.markdown("**Quick tips**")
+st.sidebar.markdown("- Teacher mints coins with the teacher password.\n- Students need their Address + PIN to transfer.\n- Database file: `educoin.db` in the same folder.")
